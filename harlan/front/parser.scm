@@ -4,8 +4,7 @@
   (import
     (rnrs)
     (harlan helpers)
-    (except (elegant-weapons helpers) ident?)
-    (cKanren mk))
+    (except (elegant-weapons helpers) ident?))
 
 (define (check-idents x*)
   (or (null? x*)
@@ -20,7 +19,7 @@
                           (map (lambda (d)
                                  (match d
                                    ((define-datatype ,name . ,_)
-                                    (list name))
+                                    (list (cons name (gensym name))))
                                    (,else '())))
                                decl*))))
      `(module . ,(map (parse-decl type-env) decl*)))))
@@ -33,34 +32,23 @@
      `(extern ,name . ,t)))
   ((define-datatype ,name
      (,tag ,[(parse-type type-env) -> t] ...) ...)
-   `(define-datatype ,name (,tag ,t ...) ...))
+   `(define-datatype ,(cdr (assq name type-env)) (,tag ,t ...) ...))
   ((define (,name . ,args) . ,stmt*)
    (begin
      (unless (symbol? name)
        (error 'parse-harlan "invalid function name, expected symbol" name))
-     (let* ((args^ (map gensym args))
-            (env (map cons args args^)))
-       `(fn ,name ,args^ ,(make-begin (map (parse-stmt env) stmt*))))))
-  ((fn ,name ,args . ,stmt*)
-   (begin
-     (unless (symbol? name)
-       (error 'parse-harlan "invalid function name, expected symbol" name))
-     (let* ((args^ (map gensym args))
-            (env (map cons args args^)))
-       `(fn ,name ,args^ ,(make-begin (map (parse-stmt env) stmt*)))))))
+     (let* ((env (map list args)))
+       `(fn ,(if (eq? name 'main)
+                 'harlan_main
+                 name)
+            ,args ,(make-begin (map (parse-stmt env) stmt*)))))))
 
 (define-match (parse-type type-env)
-  (void 'void)
-  (int 'int)
-  (u64 'u64)
-  (str 'str)
-  (float 'float)
-  (ofstream 'ofstream)
-  (,t (guard (member t type-env)) `(adt ,t))
+  (,t (guard (assq t type-env)) `(adt ,(cdr (assq t type-env))))
+  (,x (guard (ident? x)) x)
   ((ptr ,[t]) `(ptr ,t))
-  ((vec ,n ,[t])
-   (guard (integer? n))
-   `(vec ,n ,t))
+  ((vec ,[t])
+   `(vec ,(gensym 'vec_r) ,t))
   ((closure (,[t*] ...) -> ,[t])
    `(closure ,t* -> ,t))
   (((,[t*] ...) -> ,[t])
@@ -73,9 +61,6 @@
    `(print . ,e))
   ((println ,[(parse-expr env) -> e] ...)
    `(println . ,e))
-  ((return) `(return))
-  ((return ,[(parse-expr env) -> e])
-   `(return ,e))
   ((if ,[(parse-expr env) -> test]
        ,[(parse-stmt env) -> conseq])
    `(if ,test ,conseq))
@@ -95,10 +80,9 @@
   ((let ((,x* ,[(parse-expr env) -> e*]) ...) . ,body)
    (begin
      (check-idents x*)
-     (let* ((x*^ (map gensym x*))
-            (env (append (map cons x* x*^) env))
+     (let* ((env (append (map list x*) env))
             (body (map (parse-stmt env) body)))
-       `(let ((,x*^ ,e*) ...) ,(make-begin body)))))
+       `(let ((,x* ,e*) ...) ,(make-begin body)))))
   (,[(parse-expr env) -> e] `(do ,e)))
 
 (define-match (parse-expr env)
@@ -109,21 +93,14 @@
   (,x (guard (symbol? x))
     (let ((x^ (assq x env)))
       (unless x^ (error 'parse-expr "free variable" x))
-      `(var ,(cdr x^))))
+      `(var ,x)))
   (,str (guard (string? str)) `(str ,str))
-  ((var ,x)
-   (guard (symbol? x))
-   (let ((x^ (assq x env)))
-     (unless x^ (error 'parse-expr "free variable" x))
-     `(var ,(cdr x^))))
   ((vector ,[e*] ...)
    `(vector . ,e*))
   ((vector-r ,r ,[e*] ...)
    `(vector-r ,r . ,e*))
   ((begin ,[(parse-stmt env) -> stmt*] ... ,[(parse-expr env) -> expr])
    `(begin ,@stmt* ,expr))
-  ((make-vector ,[(parse-expr env) -> size] ,[expr])
-   `(make-vector ,size ,expr))
   ((if ,[test] ,[conseq] ,[alt])
    `(if ,test ,conseq ,alt))
   ((iota ,[e])
@@ -134,9 +111,12 @@
    `(vector-ref ,v ,i))
   ((unsafe-vector-ref ,[v] ,[i])
    `(unsafe-vector-ref ,v ,i))
+  ((unsafe-vec-ptr ,[v]) `(unsafe-vec-ptr ,v))
   ((length ,[e])
    `(length ,e))
-  ((int->float ,[e]) `(int->float ,e))
+  ((unsafe-explicit-cast
+    (,[(parse-type env) -> t1] -> ,[(parse-type env) -> t2]) ,[e])
+   `(unsafe-explicit-cast (,t1 -> ,t2) ,e))
   ((lambda (,x* ...) ,stmt* ... ,expr)
    (begin
      (check-idents x*)
@@ -149,42 +129,34 @@
   ((let ((,x* ,[(parse-expr env) -> e*]) ...) ,stmt* ... ,expr)
    (begin
      (check-idents x*)
-     (let* ((x*^ (map gensym x*))
-            (env (append (map cons x* x*^) env))
+     (let* ((env (append (map list x*) env))
             (stmt* (map (parse-stmt env) stmt*))
             (expr ((parse-expr env) expr)))
-       `(let ((,x*^ ,e*) ...) ,(make-begin `(,@stmt* ,expr))))))
+       `(let ((,x* ,e*) ...) ,(make-begin `(,@stmt* ,expr))))))
   ((kernel ((,x* ,[e*]) ...) ,stmt* ... ,e)
    (begin
      (check-idents x*)
-     (let* ((x*^ (map gensym x*))
-            (env (append (map cons x* x*^) env)))
-       `(kernel ((,x*^ ,e*) ...)
+     (let* ((env (append (map list x*) env)))
+       `(kernel ((,x* ,e*) ...)
           ,(make-begin
              `(,@(map (parse-stmt env) stmt*)
                ,((parse-expr env) e)))))))
   ((kernel-r ,r ((,x* ,[e*]) ...) ,stmt* ... ,e)
    (begin
      (check-idents x*)
-     (let* ((x*^ (map gensym x*))
-            (env (append (map cons x* x*^) env)))
-       `(kernel-r ,r ((,x*^ ,e*) ...)
+     (let* ((env (append (map list x*) env)))
+       `(kernel-r ,r ((,x* ,e*) ...)
           ,(make-begin
              `(,@(map (parse-stmt env) stmt*)
                ,((parse-expr env) e)))))))
-  ((reduce ,op ,[e])
-   (begin
-     (unless (reduceop? op)
-       (error 'parse-expr "invalid operation in reduction" op))
-     `(reduce ,op ,e)))
   ((match ,[e]
      ((,tag ,x* ...) ,s* ... ,e*) ...)
    (guard (and (andmap ident? tag)
                (andmap (lambda (x*) (andmap ident? x*)) x*)))
    (let-values (((x* e*)
-                 (let ((x*^ (map (lambda (x) (map gensym x)) x*)))
+                 (let ((x*^ (map (lambda (x) (map list x)) x*)))
                    (values
-                    x*^
+                    x*
                     (map (lambda (x* x*^ s* e*)
                            (let ((env (append (map cons x* x*^) env)))
                              (make-begin
@@ -194,6 +166,7 @@
                          x* x*^ s* e*)))))
      `(match ,e
         ((,tag ,x* ...) ,e*) ...)))
+  ((error! ,s) `(error! ,s))
   ((,op ,[lhs] ,[rhs])
    (guard (or (binop? op) (relop? op)))
    `(,op ,lhs ,rhs))
@@ -202,7 +175,7 @@
    ;; reason, so here we take advantage of that fact to differentiate
    ;; between call and invoke instructions.
    (guard (and (symbol? rator) (not (assq rator env))))
-   `(call ,rator . ,rand*))
+   `(call ,(if (eq? rator 'main) 'harlan_main rator) . ,rand*))
   ((,[rator] ,[rand*] ...)
    `(invoke ,rator . ,rand*)))
 

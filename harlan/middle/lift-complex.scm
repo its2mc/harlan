@@ -13,8 +13,8 @@
       ((void) (finish `(void)))
       ((,t ,n) (guard (scalar-type? t)) (finish `(,t ,n)))
       ((var ,t ,x) (finish `(var ,t ,x)))
-      ((int->float ,e)
-       (lift-expr e (lambda (e) (finish `(int->float ,e)))))
+      ((cast ,t ,e)
+       (lift-expr e (lambda (e) (finish `(cast ,t ,e)))))
       ((not ,e)
        (lift-expr e (lambda (e) (finish `(not ,e)))))
       ((begin ,[lift-stmt -> stmt*] ... ,e)
@@ -32,8 +32,10 @@
          (lambda (t)
            (let ((if-res (gensym 'if_res))
                  (type (type-of conseq)))
-             (let ((c (lift-expr conseq (lambda (c) `(set! (var ,type ,if-res) ,c))))
-                   (a (lift-expr alt (lambda (a) `(set! (var ,type ,if-res) ,a)))))
+             (let ((c (lift-expr conseq (lambda (c)
+                                          `(set! (var ,type ,if-res) ,c))))
+                   (a (lift-expr alt (lambda (a)
+                                       `(set! (var ,type ,if-res) ,a)))))
                `(let ((,if-res ,type))
                   (begin
                     (if ,t ,c ,a)
@@ -45,6 +47,8 @@
            (lift-expr
              e2 (lambda (e2^)
                   (finish `(vector-ref ,t ,e1^ ,e2^)))))))
+      ((unsafe-vec-ptr ,t ,e)
+       (lift-expr e (lambda (e^) (finish `(unsafe-vec-ptr ,t ,e^)))))
       ((make-vector ,t ,r ,e)
        (lift-expr e (lambda (e^) (finish `(make-vector ,t ,r ,e^)))))
       ((vector ,t ,r . ,e*)
@@ -107,14 +111,14 @@
        (lambda (e^) (loop (cdr e*) (cons e^ e^*))))))))
 
 (define-match lift-stmt
-  ((kernel ,t ,dims (((,x* ,t*) (,e* ,ts*) ,dim*) ...) ,[body])
+  ((kernel ,t ,dims (danger: . ,dng) (((,x* ,t*) (,e* ,ts*) ,dim*) ...) ,[body])
    (lift-expr*
     dims
     (lambda (dims)
       (lift-expr*
        e*
        (lambda (e*^)
-         `(kernel ,t ,dims
+         `(kernel ,t ,dims (danger: . ,dng)
                   (((,x* ,t*) (,e*^ ,ts*) ,dim*) ...)
                   ,body))))))
   ((begin ,[lift-stmt -> stmt*] ...)
@@ -136,6 +140,9 @@
     (lambda (x)
        (lift-expr e (lambda (e^) `(set! ,x ,e^))))))
   ((let-region (,r ...) ,[body]) `(let-region (,r ...) ,body))
+  ((transaction (,r ...) ,[e])
+   `(transaction (,r ...) ,e))
+  ((retry-transaction) `(retry-transaction))
   ((let () ,[stmt]) stmt)
   ((let ((,x ,t ,e) . ,rest) ,stmt)
    (Expr e
@@ -178,7 +185,6 @@
 (define-match type-of
   ((,t ,v) (guard (scalar-type? t)) t)
   ((var ,t ,x) t)
-  ((int->float ,t) `float)
   ((length ,t) `int)
   ((addressof ,[t]) `(ptr ,t))
   ((deref ,[t]) (cadr t))
@@ -196,6 +202,6 @@
      ((fn ,args -> ,t) t)))
   ((,op ,lhs ,rhs)
    (guard (relop? op))
-   rhs))
+   'bool))
 
 )

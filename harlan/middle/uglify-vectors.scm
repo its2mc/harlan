@@ -1,15 +1,29 @@
 (library
   (harlan middle uglify-vectors)
-  (export uglify-vectors
+  (export uglify-vectors ;;uglify-vectors-new
     uglify-stmt
     uglify-decl
     uglify-expr)
   (import
     (rnrs)
+    (elegant-weapons compat)
     (only (harlan front typecheck) free-regions-type)
+    (nanopass)
+    (only (harlan middle returnify-kernels)
+          danger-type allocation-failure)
     (elegant-weapons helpers)
     (elegant-weapons sets))
 
+;;(define-pass uglify-vectors-new : M7.1 (m) -> M7.2 ()
+;;  
+;;  ;; For now, don't do anything just to make sure we get the parsing
+;;  ;; right.
+;;  )
+
+(define in-kernel? (make-parameter #f))
+(define danger-var (make-parameter #f))
+(define danger-vec-type (make-parameter #f))
+  
 (define (remove-dups ls)
   (cond
    ((null? ls) `())
@@ -28,7 +42,6 @@
      (+ ,e ,vector-length-offset))
     ,i))
 
-;; TODO: should this return true for region-allocated ADTs as well?
 (define-match region-allocated?
   ((vec ,r ,t) #t)
   (,else #f))
@@ -48,10 +61,34 @@
      (var (ptr region) ,region)
      ,e)))
 
-(define-match extract-regions
-  ;;((fn (,[t*] ...) -> ,[t])
-  ;; (append (apply append t*) t))
-  (,else (free-regions-type else)))
+(define extract-regions free-regions-type)
+
+;; For variable references, we need to handle regions specially when
+;; the reference is to a function call.
+(define (extract-var-regions x t)
+  (let ((callee-type (hashtable-ref (function-types) x #f)))
+    (if callee-type
+        (let ((env
+               (let walk-types ((env '())
+                                (callee callee-type)
+                                (caller t))
+                 (match `(,callee ,caller)
+                   (((fn (,t* ...) -> ,t)
+                     (fn (,t^* ...) -> ,t^))
+                    (fold-left walk-types env (cons t t*) (cons t^ t^*)))
+                   (((vec ,r ,t) (vec ,r^ ,t^))
+                    (walk-types (cons (cons r r^) env) t t^))
+                   (((adt ,n ,r) (adt ,n^ ,r^))
+                    (cons (cons r r^) env))
+                   (((ptr ,t) (ptr ,t^))
+                    (walk-types env t t^))
+                   (((struct (,x* ,t*) ...) (struct (,x^* ,t^*) ...))
+                    (fold-left walk-types env t* t^*))
+                   (((union (,x* ,t*) ...) (union (,x^* ,t^*) ...))
+                    (fold-left walk-types env t* t^*))
+                   (,_ env)))))
+          (map (lambda (x) (cdr (assq x env))) (extract-regions callee-type)))
+        (extract-regions t))))
 
 (define (remove-regions t)
   (match t
@@ -63,11 +100,25 @@
      `(struct (,x* ,t*) ...))
     ((union (,x* ,[t*]) ...)
      `(union (,x* ,t*) ...))
+    ((box ,r ,t) 'region_ptr)
     (,else else)))
 
+;; We're going to keep all the function declarations in a global table
+;; to make it easier to get to them at the call site.
+(define function-types (make-parameter #f))
+
+(define (build-function-table decl)
+  (let ((table (function-types)))
+    (match decl
+      ((fn ,name ,formals ,type . ,_)
+       (hashtable-set! table name type))
+      (,_ _))))
+
 (define-match uglify-vectors
-  ((module ,[uglify-decl -> decl*] ...)
-   `(module . ,decl*)))
+  ((module ,decl* ...)
+   (parameterize ((function-types (make-eq-hashtable)))
+     (for-each build-function-table decl*)
+     `(module . ,(map uglify-decl decl*)))))
 
 (define-match uglify-decl
   ((fn ,name ,args (fn ,arg-t -> ,rt)
@@ -83,7 +134,11 @@
           ,s)))
   ((typedef ,name ,t) `(typedef ,name ,(remove-regions t)))
   ((extern ,name ,args -> ,t)
-   `(extern ,name ,args -> ,t)))
+   (let ((all-regions (map (lambda (_) `(ptr region))
+                           (free-regions-type `(fn ,args -> ,t))))
+         (args (map remove-regions args))
+         (t (remove-regions t)))
+     `(extern ,name ,(append args all-regions) -> ,t))))
 
 (define-match (uglify-let finish)
   (() (values finish `()))
@@ -94,14 +149,30 @@
           (vv (uglify-let-vec t `(var int ,length) r))
           (xt (remove-regions `(vec ,r ,t))))
      (values
-      `(let ((,length int ,n))
-         (let ((,x ,xt ,vv))
-           ,(make-begin
-             `((if (= (int 0) (cast int (var ,xt ,x)))
-                   (error allocation-failure))
-               (set! ,(vector-length-field `(var ,xt ,x) r)
-                     (var int ,length))
-               ,rest))))
+      `(let ((,x ,xt (call (c-expr (fn ((ptr region) int int) -> region_ptr)
+                                   alloc_vector)
+                           ;; OpenCL doesn't always cope well with
+                           ;; pointers to pointers. We can't realloc
+                           ;; in a kernel anyway, so we have this bit
+                           ;; to adjust for the difference in calling
+                           ;; conventions.
+                           ,(if (in-kernel?)
+                                `(var region ,r)
+                                `(addressof (var region ,r)))
+                           (sizeof ,(remove-regions t))
+                           ,n)))
+         ,(if (in-kernel?)
+              `(begin (if (= (int 0) (var ,xt ,x))
+                          (begin
+                            (set! ,(uglify-vector-ref danger-type
+                                                      `(var ,(remove-regions (danger-vec-type)) ,(danger-var))
+                                                      allocation-failure
+                                                      (match (danger-vec-type)
+                                                        ((vec ,r ,t) r)))
+                                  (bool #t))
+                            (return))
+                          ,rest))
+              rest))
       (append r* rr*))))
   (((,x ,t ,[uglify-expr -> e er*])
     . ,[(uglify-let finish) -> rest rr*])
@@ -143,6 +214,8 @@
   ((set! ,[uglify-expr -> lhs lr*]
          ,[uglify-expr -> rhs rr*])
    (values `(set! ,lhs ,rhs) (append lr* rr*)))
+  ((label ,lbl) (values `(label ,lbl) '()))
+  ((goto ,lbl) (values `(goto ,lbl) '()))
   ((return)
    (values `(return) `()))
   ((return ,[uglify-expr -> e r*])
@@ -155,21 +228,26 @@
   ((kernel
      ,t
      (,[uglify-expr -> dims dr**] ...)
+     (danger: ,dv ,dt)
      (free-vars . ,fv*)
-     ,[stmt sr*])
-   (let ((regions (remove-dups
-                   (apply append sr*
-                          (map extract-regions
-                               (map cadr fv*))))))
-     (values
-      `(kernel ,dims
-               (free-vars
-                ,@(map (lambda (fv) `(,(car fv)
-                                 ,(remove-regions (cadr fv))))
-                       fv*)
-                ,@(map (lambda (r) `(,r (ptr region))) regions))
-               ,stmt)
-      (apply append sr* dr**))))
+     ,stmt)
+   (let-values (((stmt sr*) (parameterize ((in-kernel?  #t)
+                                           (danger-var  dv)
+                                           (danger-vec-type dt))
+                              (uglify-stmt stmt))))
+     (let ((regions (remove-dups
+                     (apply append sr*
+                            (map extract-regions
+                                 (map cadr fv*))))))
+       (values
+        `(kernel ,dims
+           (free-vars
+            ,@(map (lambda (fv) `(,(car fv)
+                                  ,(remove-regions (cadr fv))))
+                   fv*)
+            ,@(map (lambda (r) `(,r (ptr region))) regions))
+           ,stmt)
+        (apply append sr* dr**)))))
   ((do ,[uglify-expr -> e r*])
    (values `(do ,e) r*)))
 
@@ -180,9 +258,8 @@
    (values `(,(remove-regions t) ,n) `()))
   ((var ,tx ,x)
    (values `(var ,(remove-regions tx) ,x)
-           (extract-regions tx)))
-  ((int->float ,[e r*])
-   (values `(cast float ,e) r*))
+           (extract-var-regions x tx)))
+  ((cast ,t ,[e r]) (values `(cast ,t ,e) r))
   ((call ,[name nr*] ,[args ar**] ...)
    (values `(call ,name
                   ,@args
@@ -199,15 +276,18 @@
    (guard (or (binop? op) (relop? op)))
    (values `(,op ,lhs ,rhs)
            (append lr* rr*)))
-  ((vector-ref ,t ,[e er*] ,[i ir*])
+  ((vector-ref ,t ,[uglify-expr/r -> e er* r] ,[i ir*])
    (begin
      (assert (not (null? er*)))
-     (values (uglify-vector-ref t e i (car er*))
+     (values (uglify-vector-ref t e i r)
              (append er* ir*))))
-  ((length ,[e r*])
+  ((unsafe-vec-ptr (ptr ,t) ,[uglify-expr/r -> v r* r])
+   (values `(addressof ,(uglify-vector-ref t v `(int 0) r))
+           (append r*)))
+  ((length ,[uglify-expr/r -> e r* r])
    (begin
      (assert (not (null? r*)))
-     (values (vector-length-field e (car r*)) r*)))
+     (values (vector-length-field e r) r*)))
   ((addressof ,[expr r*])
    (values `(addressof ,expr) r*))
   ((field ,[e r] ,x)
@@ -223,4 +303,16 @@
   ((deref ,[expr r*])
    (values `(deref ,expr) r*)))
 
-)
+;; uglifies an expression and returns the region we need if this is
+;; going to be immediately followed by a region reference. See its use
+;; in length.
+(define (uglify-expr/r e^)
+  (let-values (((e r*) (uglify-expr e^)))
+    (values e r*
+            (match e^
+              ((var (vec ,r ,t) ,x) r)
+              ((var (ptr (vec ,r ,t)) ,x) r)
+              ((vector-ref (vec ,r ,t) ,v ,i) r)
+              ((deref ,[r]) r)
+              (,else (error 'uglify-expr/r
+                            "can't determine region for expression" else)))))))

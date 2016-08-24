@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 #include <time.h>
 
@@ -33,15 +34,15 @@ uint64_t nanotime() {
     uint64_t ns_per_s = 1000000000LL;
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (ts.tv_sec * ns_per_s + ts.tv_nsec);
+    return ((uint64_t)ts.tv_sec * (uint64_t)ns_per_s + (uint64_t)ts.tv_nsec);
 #endif    
 }
 
 // () -> float
 //
 // Retuns the value of a timer in seconds.
-double time$s() {
-  return double(nanotime()) / 1e9;
+float time$ds() {
+	return float(nanotime() / 1000) / 1e6;
 }
 
 // (str) -> (ptr ofstream)
@@ -67,4 +68,103 @@ void reset_kernel_time() {
 
 float sqrt(float x) {
     return sqrtf(x);
+}
+template<typename T>
+struct harlan_vector {
+	int64_t length;
+	T data[];
+};
+
+// in harlan.cpp
+extern int ARGC;
+extern char **ARGV;
+
+#define VECTOR_LENGTH_OFFSET 8
+
+// () -> (vec str)
+region_ptr command$dline(region *&r) {
+	region_ptr ptr = alloc_in_region(&r,
+									 VECTOR_LENGTH_OFFSET 
+									 + ARGC * sizeof(char *));
+	harlan_vector<char *> *vec
+		= (harlan_vector<char *> *)get_region_ptr(r, ptr);
+
+	vec->length = ARGC;
+	
+	for(int i = 0; i < ARGC; ++i) {
+		vec->data[i] = ARGV[i];
+	}
+
+	return ptr;
+}
+
+// (str) -> (vec char)
+region_ptr str$d$vvec(const char *str, region *&r) {
+	int length = strlen(str);
+
+	region_ptr ptr = alloc_in_region(&r,
+									 VECTOR_LENGTH_OFFSET
+									 + length * sizeof(char));
+	harlan_vector<char> *vec
+		= (harlan_vector<char> *)get_region_ptr(r, ptr);
+	
+	vec->length = length;
+	
+	for(int i = 0; i < length; ++i) {
+		vec->data[i] = str[i];
+	}
+	
+	return ptr;
+}
+
+const char *EMPTY_ENV_VAR = "";
+
+const char *get$denvironment$dvariable(const char *name) {
+    char *v = getenv(name);
+    if(v) {
+        return v;
+    }
+    else {
+        return EMPTY_ENV_VAR;
+    }
+}
+
+int hscanf(FILE *f, const char *s, int *i) {
+    return fscanf(f, s, i);
+}
+
+int hscanf$dfloat(FILE *f, const char *s, float *n) {
+    return fscanf(f, s, n);
+}
+
+int hscanfu64(FILE *f, uint64_t *i) {
+  return fscanf(f, "%" SCNu64, i);
+}
+
+// This will leak memory (#149)
+char* hgets(FILE *f) {
+	char buffer[1024];
+	fscanf(f, "%1024s", buffer);
+
+	int len = strnlen(buffer, sizeof(buffer));
+
+	char *new_str = (char *)malloc(len + 1);
+	memset(new_str, 0, len + 1);
+	strncpy(new_str, buffer, len);
+
+	return new_str;
+}
+
+// This will leake memory (#149)
+char *file$dread$dline(FILE *f) {
+	char *buf = NULL;
+	size_t size = 0;
+	
+	getline(&buf, &size, f);
+
+	return buf;
+}
+
+void flush$dstdout() {
+	cout.flush();
 }

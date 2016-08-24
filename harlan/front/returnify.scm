@@ -19,7 +19,8 @@
    `(extern ,name ,args -> ,rtype)))
 
 (define-match returnify-stmt
-  ((var ,x) `(return (var ,x)))       
+  ((var ,x) `(return (var ,x)))
+  ((set! ,e1 ,e2) `(set! ,e1 ,e2))
   ((let ((,x ,e) ...) ,[stmt])
    `(let ((,x ,e) ...) ,stmt))
   ((let-region (,r) ,[s]) `(let-region (,r) ,s))
@@ -29,6 +30,7 @@
   ((while ,e ,[returnify-stmt -> s]) `(while ,e ,s))
   ((return) `(return))
   ((return ,expr) `(return ,expr))
+  ((do (error! ,s)) `(do (error! ,s)))
   ((do ,expr) `(return ,expr))
   ((begin ,stmt* ... ,[returnify-stmt -> stmt])
    (make-begin `(,@stmt* ,stmt)))

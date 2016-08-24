@@ -1,14 +1,13 @@
 (library
   (harlan front typecheck)
-  (export typecheck free-regions-type)
+  (export typecheck free-regions-type gen-rvar)
   (import
     (rnrs)
-    (only (chezscheme) make-parameter parameterize
-          pretty-print printf trace-define trace-let trace)
     (elegant-weapons match)
     (elegant-weapons helpers)
     (elegant-weapons sets)
     (harlan compile-opts)
+    (util compat)
     (util color))
 
   (define (typecheck m)
@@ -94,6 +93,9 @@
                     s
                     (maybe-subst ra rb s))))
 
+             (((ptr ,a) (ptr ,b))
+              (unify-types a b s))
+             
              (((adt ,ta ,ra) (adt ,tb ,rb))
               (let ((s (unify-types ta tb s)))
                 (if (eq? ra rb)
@@ -137,9 +139,19 @@
                        (walk-type b s)))))
       s))
 
+  ;; Remove extra tags and things so that the expression looks more like
+  ;; what the programmer typed.
+  (define (unparse e)
+    (match e
+      ((num ,n) n)
+      ((str ,s) s)
+      ((,op ,[e1] ,[e2]) (guard (binop? op))
+       `(,op ,e1 ,e2))
+      (,else else)))
+  
   (define (type-error e expected found)
     (display "In expression...\n")
-    (pretty-print e)
+    (pretty-print (unparse e))
     (display "Expected type...\n")
     (pretty-print expected)
     (display "But found...\n")
@@ -159,7 +171,6 @@
   (define (unify a b seq)
     (lambda (e r s)
       (let ((s^ (unify-types a b s)))
-        ;;(printf "Unifying ~a and ~a => ~a\n" a b s)
         (if s^
             ((seq) e r s^)
             (type-error e (walk-type a s) (walk-type b s))))))
@@ -212,12 +223,17 @@
   (define (free-var-types e env)
     (match e
       ((num ,i) '())
+      ((float ,f) '())
+      ((bool ,b) '())
       ((var ,t ,x)
        (if (memq x env)
            '()
            (list (cons x t))))
       ((lambda ,t ((,x* ,t*) ...) ,b)
        (free-var-types b (append x* env)))
+      ((let ((,x* ,t* ,[e*]) ...) ,b)
+       (apply append (free-var-types b (append x* env)) e*))
+      ((if ,[t] ,[c] ,[a]) (append t c a))
       ((vector-ref ,t ,[x] ,[i])
        (append x i))
       ((match ,t ,[e]
@@ -272,6 +288,9 @@
        ((int->float ,e)
         (do* (((e _) (require-type e env 'int)))
              (return `(int->float ,e) 'float)))
+       ((float->int ,e)
+        (do* (((e _) (require-type e env 'float)))
+             (return `(float->int ,e) 'int)))
        ((return)
         (unify-return-type
          'void
@@ -336,6 +355,14 @@
           (do* (((v _) (require-type v env `(vec ,r ,t)))
                 ((i _) (require-type i env 'int)))
                (return `(unsafe-vector-ref ,t ,v ,i) t))))
+       ((unsafe-vec-ptr ,v)
+        (let ((t (make-tvar (gensym 'tvecref)))
+              (r (make-rvar (gensym 'rvref))))
+          (do* (((v _) (require-type v env `(vec ,r ,t))))
+               (return `(unsafe-vec-ptr (ptr ,t) ,v) `(ptr ,t)))))
+       ((unsafe-explicit-cast (,t1 -> ,t2) ,e)
+        (do* (((e _) (require-type e env t1)))
+             (return `(cast ,t2 ,e) t2)))
        ((,+ ,a ,b) (guard (binop? +))
         (do* (((a t) (infer-expr a env))
               ((b t) (require-type b env t))
@@ -500,10 +527,33 @@
                                  (return (cons e^ e**^) t))))))
                       ((() () ()) (return '() (make-tvar (gensym 'tmatch))))))))
                 (return `(match ,t ,e ((,tag ,x* ...) ,e*) ...) t)))))
+       ((error! ,s) (guard (string? s))
+        (return `(error! ,s) (gen-tvar 'error!)))
         )))
   
   (define infer-body infer-expr)
 
+  (define (add-region-vars-to-type end adt-graph)
+    (lambda (t*)
+      (match t*
+        ((vec ,[t])
+         `(vec ,@end ,t))
+        ((vec ,r ,[t])
+         (begin
+           (display "Warning, in type \n")
+           (display t*)
+           (display " there was already a region parameter. Replacing with \n")
+           (display end)
+           (newline)
+           `(vec ,@end ,t)))
+        ((closure (,[t*] ...) -> ,[t])
+         `(closure ,@end ,t* -> ,t))
+        ((adt ,t^) (guard (recursive-adt? t^ adt-graph))
+         `(adt ,t^ . ,end))
+        (,else (begin #;(if (pair? else)
+                          (display else))
+                      else)))))
+  
   (define (make-top-level-env decls adt-graph)
     (append
      (apply append
@@ -517,18 +567,9 @@
                                       (list (make-rvar (gensym t)))
                                       '()))
                              (t* (map (lambda (t*)
-                                        (map (lambda (t*)
-                                               (match t*
-                                                 ((vec ,[t])
-                                                  `(vec ,@end ,t))
-                                                 ((closure (,[t*] ...) -> ,[t])
-                                                  `(closure ,@end ,t* -> ,t))
-                                                 ((adt ,t^)
-                                                  (guard
-                                                   (recursive-adt? t^
-                                                                   adt-graph))
-                                                  `(adt ,t^ . ,end))
-                                                 (,else else))) t*))
+                                        (map (add-region-vars-to-type end
+                                                                      adt-graph)
+                                             t*))
                                       t*)))
                         `((,type-tag (adt ,t . ,end) (,c ,t* ...) ...)
                           (,c fn (,t* ...)
@@ -537,7 +578,9 @@
                       (list (cons name (cons 'fn t))))))
                 decls))
      ;; Add some primitives
-     '((harlan_sqrt fn (float) -> float))))
+     '((harlan_sqrt fn (float) -> float)
+       (floor fn (float) -> float)
+       (atan2 fn (float float) -> float))))
 
   (define (recursive-adt? name graph)
     (let loop ((path (list name)))
@@ -649,8 +692,9 @@
        ((,e . ,e*) (lookup-type-tags tags e*))))
   
   (define (ground-module m s)
-    (if (verbose) (begin (pretty-print m) (newline)
-                         (pretty-print s) (newline)))
+    (if (verbosity? trace-pass-verbosity-level)
+        (begin (pretty-print m) (newline)
+               (pretty-print s) (newline)))
     
     (match m
       ((module ,[(lambda (d) (ground-decl d s)) -> decl*] ...)
@@ -671,8 +715,6 @@
                          (map (lambda (c t*)
                                 `(,c . ,(map (lambda (t) (ground-type t s)) t*)))
                               c t*)) c t*))))
-      ;;((define-datatype ,t (,c ,t* ...) ...)
-      ;; `(define-datatype ,t (,c ,t* ...) ...))
       ((fn ,name (,var ...)
            ,[(lambda (t) (ground-type t s)) -> t]
            ,[(lambda (e) (ground-expr e s)) -> body])
@@ -695,7 +737,12 @@
                   ;; We have a free variable that's constrained as
                   ;; Numeric, so ground it as an integer.
                   ((Numeric) 'int))
-                (error 'ground-type "free type variable" t)))
+                (begin
+                  (display "Warning: free type variable: ")
+                  (display t)
+                  (newline)
+                  (display "Defaulting to type int.\n")
+                  'int)))
           (match t
             (,prim (guard (symbol? prim)) prim)
             ((vec ,r ,t) `(vec ,(region-name r) ,(ground-type t s)))
@@ -715,12 +762,16 @@
         ((float ,f) `(float ,f))
         ;; This next line is cheating, but it should get us through
         ;; the rest of the compiler.
-        ((num ,n) `(int ,n))
+        ((num ,n)
+         (if (< n #x100000000)
+             `(int ,n)
+             `(u64 ,n)))
         ((char ,c) `(char ,c))
         ((str ,s) `(str ,s))
         ((bool ,b) `(bool ,b))
         ((var ,[ground-type -> t] ,x) `(var ,t ,x))
         ((int->float ,[e]) `(int->float ,e))
+        ((float->int ,[e]) `(float->int ,e))
         ((,op ,[ground-type -> t] ,[e1] ,[e2])
          (guard (or (relop? op) (binop? op)))
          `(,op ,t ,e1 ,e2))
@@ -744,8 +795,12 @@
         ((length ,[e]) `(length ,e))
         ((vector-ref ,[ground-type -> t] ,[v] ,[i])
          `(vector-ref ,t ,v ,i))
+        ((cast ,[ground-type -> t] ,[e])
+         `(cast ,t ,e))
         ((unsafe-vector-ref ,[ground-type -> t] ,[v] ,[i])
          `(unsafe-vector-ref ,t ,v ,i))
+        ((unsafe-vec-ptr ,[ground-type -> t] ,[v])
+         `(unsafe-vec-ptr ,t ,v))
         ((kernel-r ,[ground-type -> t] ,r
            (((,x ,[ground-type -> ta*]) (,[e] ,[ground-type -> ta**])) ...)
            ,[b])
@@ -765,17 +820,19 @@
         ((match ,[ground-type -> t] ,[e]
                 ((,tag . ,x) ,[e*]) ...)
          `(match ,t ,e ((,tag . ,x) ,e*) ...))
-        (,else (error 'ground-expr "Unrecognized expression" else))
-        )))
+        ((error! ,s) `(error! ,s))
+        (,else (error 'ground-expr "Unrecognized expression" else)))))
 
   (define-match free-regions-expr
     ((var ,[free-regions-type -> t] ,x) t)
     ((int ,n) '())
+    ((u64 ,n) '())
     ((float ,f) '())
     ((char ,c) '())
     ((bool ,b) '())
     ((str ,s) '())
     ((int->float ,[e]) e)
+    ((float->int ,[e]) e)
     ((assert ,[e]) e)
     ((print ,[free-regions-type -> t] ,[e]) (union t e))
     ((print ,[free-regions-type -> t] ,[e] ,[f]) (union t e f))
@@ -786,15 +843,20 @@
     ((vector ,[free-regions-type -> t] ,[e*] ...)
      (union t (apply union e*)))
     ((length ,[e]) e)
+    ((cast ,[free-regions-type -> t] ,[e])
+     (union t e))
     ((vector-ref ,[free-regions-type -> t] ,[x] ,[i]) (union t x i))
     ((unsafe-vector-ref ,[free-regions-type -> t] ,[x] ,[i]) (union t x i))
+    ((unsafe-vec-ptr ,[free-regions-type -> t] ,[v])
+     (union t v))
     ((iota-r ,r ,[e]) (set-add e r))
     ((make-vector ,[free-regions-type -> t] ,[len] ,[val])
      (union t len val))
     ((kernel-r ,[free-regions-type -> t] ,r
-       (((,x ,[free-regions-type -> t*]) (,xs ,[free-regions-type -> ts*])) ...)
+       (((,x ,[free-regions-type -> t*]) (,[xs] ,[free-regions-type -> ts*]))
+        ...)
        ,[b])
-     (set-add (union b t (apply union (append t* ts*))) r))
+     (set-add (union b t (apply union (append t* ts* xs))) r))
     ((reduce ,[free-regions-type -> t] ,op ,[e]) (union t e))
     ((set! ,[x] ,[e]) (union x e))
     ((begin ,[e*] ...) (apply union e*))
@@ -820,7 +882,8 @@
             (,p ,[e*]) ...)
      (apply union `(,t ,e . ,e*)))
     ((return) '())
-    ((return ,[e]) e))
+    ((return ,[e]) e)
+    ((error! ,s) '()))
 
   (define-match free-regions-type
     ;; This isn't fantastic... what if this later unifies to a type
@@ -834,6 +897,8 @@
      (set-add (apply union t t*) r))
     ((fn (,[t*] ...) -> ,[t]) (union t (apply union t*)))
     ((ptr ,[t]) t)
+    ;; Boxes hide all their regions until they are unboxed.
+    ((box ,r ,t) (list r))
     (() '())
     (,else (guard (symbol? else)) '()))
   )

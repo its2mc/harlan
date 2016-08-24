@@ -1,0 +1,104 @@
+(module
+
+  (import graphics)
+
+  (define-datatype ray-result
+    (miss)
+    ;; The ray hits the surface and is completely absorbed, so it
+    ;; should be rendered with the returned color.
+    ;;
+    ;; the float tells the distance so we can do occlusion when
+    ;; multiple rays hit.
+    (hit float point3f-t))
+
+  (define (minimum a b)
+    (if (< a b) a b))
+  (define (maximum a b)
+    (if (> a b) a b))
+  
+  (define (make-diffuse-sphere center radius color)
+    ;; x and y are switched for some reason from how I think light
+    ;; should work.
+    (let ((light-dir (unit-length (point3f 1 1 2))))
+      (println light-dir)
+      (lambda (start direction)
+        ;; Sphere / Ray interstion code adapted from
+        ;; http://wiki.cgsociety.org/index.php/Ray_Sphere_Intersection
+        (let ((a (dot-prod direction direction))
+              (b (* 2 (dot-prod direction start)))
+              (c (- (dot-prod start start) (* radius radius))))
+          (let ((disc (- (* b b) (* 4 (* a c)))))
+            (if (< disc 0)
+                (miss)
+                (let* ((dist-sqrt (sqrt disc))
+                       (q (if (< b 0)
+                              (* -0.5 (+ b dist-sqrt))
+                              (* 0.5 (- dist-sqrt b))))
+                       (t0 (/ q a))
+                       (t1 (/ c q)))
+                  (let ((t (maximum t0 t1)))
+                    (if (< t 0)
+                        (miss)
+                        (let* ((pos (point-add (point-scale direction t)
+                                               start))
+                               (norm (unit-length (point-diff pos center)))
+                               (color (point-scale
+                                       color
+                                       (dot-prod light-dir norm))))
+                          (hit t color)))))))))))
+
+  (define-macro interpolate-range ()
+    ((_ (i start end steps) body)
+     (kernel ((j (iota steps)))
+       (let ((i (+ start (* (/ (- end start) (int->float steps))
+                            (int->float j)))))
+         body))))
+
+  (define (translate object amount)
+    (lambda (start dir)
+      (object (point-diff start amount) dir)))
+
+  (define (scale object amount)
+    (lambda (start dir)
+      (object (point-div start amount) dir)))
+  
+  (define (select-closest a b)
+    (match a
+      ((miss) b)
+      ((hit da _)
+       (match b
+         ((miss) a)
+         ((hit db _)
+          (if (< da db) a b))))))
+  
+  (define (main)
+    (let ((scene (vector (make-diffuse-sphere (point3f 0 0 0)
+                                              1
+                                              (point3f 0 0 1))
+                         (translate
+                          (make-diffuse-sphere (point3f 0 0 0)
+                                                1.5
+                                                (point3f 1 0 0))
+                          (point3f -2.5 0 0))
+                         (translate
+                          (scale (make-diffuse-sphere (point3f 0.0 0.0 0)
+                                                      1.0
+                                                      (point3f 0 1 0))
+                                 0.5)
+                          (point3f 2.0 2.0 0))))
+          (width 512)
+          (height 512)
+          (origin (point3f 0 0 -5)))
+      (let ((img (interpolate-range
+                  (y 1.0 -1.0 height) ;; y coordinate is upside down.
+                  (interpolate-range
+                   (x -1.0 1.0 width)
+                   (let ((dir (unit-length (point3f x y 1))))
+                     (match (reduce select-closest
+                              (kernel ((object scene))
+                                (object origin dir)))
+                       ((miss) (point3f 0 0 0))
+                       ((hit dist color) color)))))))
+        (write-ppm "test.bin/raytrace.ppm"
+                   (map2d (lambda (x) (rgbf->rgbi x)) img))))
+    0))

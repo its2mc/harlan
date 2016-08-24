@@ -1,0 +1,19 @@
+# -*- ruby -*-
+language: c
+
+compiler:
+ - gcc
+
+before_install:
+  - sudo apt-get update
+
+install:
+  - sudo apt-get install fglrx opencl-headers libgmp-dev texinfo
+  - ./travis/install-scheme.sh
+
+script:
+  - make
+
+env:
+  - SCHEME=petite
+#  - SCHEME=vicare

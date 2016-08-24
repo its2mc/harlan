@@ -4,7 +4,6 @@
   (export desugar-match)
   (import
    (rnrs)
-   (only (chezscheme) trace-define pretty-print)
    (elegant-weapons match)
    (elegant-weapons helpers))
 
@@ -111,8 +110,8 @@
          ((print ,[desugar-expr -> e]) `(print ,e))
          ((print ,[desugar-expr -> e] ,[desugar-expr -> o])
           `(print ,e ,o))
-         ((if ,[desugar-expr -> t] ,c ,a) `(if ,t ,c ,a))
-         ((if ,[desugar-expr -> t] ,c) `(if ,t ,c))
+         ((if ,[desugar-expr -> t] ,[c] ,[a]) `(if ,t ,c ,a))
+         ((if ,[desugar-expr -> t] ,[c]) `(if ,t ,c))
          ((for (,i ,[desugar-expr -> start]
                    ,[desugar-expr -> stop]
                    ,[desugar-expr -> step])
@@ -129,12 +128,13 @@
        
        (define-match desugar-expr
          ((int ,n) `(int ,n))
+         ((u64 ,n) `(u64 ,n))
          ((str ,s) `(str ,s))
          ((float ,f) `(float ,f))
          ((bool ,b) `(bool ,b))
          ((var ,t ,x) `(var ,t ,x))
          ((char ,c) `(char ,c))
-         ((int->float ,[i]) `(int->float ,i))
+         ((cast ,t ,[e]) `(cast ,t ,e))
          ((begin ,[desugar-stmt -> s] ... ,[e])
           `(begin ,s ... ,e))
          ((call ,[e*] ...) `(call ,e* ...))
@@ -145,6 +145,8 @@
           `(vector-ref ,t ,e ,i))
          ((unsafe-vector-ref ,t ,[e] ,[i])
           `(unsafe-vector-ref ,t ,e ,i))
+         ((unsafe-vec-ptr ,t ,[v])
+          `(unsafe-vec-ptr ,t ,v))
          ((length ,[e]) `(length ,e))
          ((iota-r ,r ,[e]) `(iota-r ,r ,e))
          ((vector ,t ,r ,[e] ...) `(vector ,t ,r ,e ...))
@@ -164,9 +166,7 @@
                                 typedefs)))
             `(let ((,e-var ,tag-type ,e))
                (let ((,tag-var int (call (c-expr
-                                          ;; use _ as the type. It's
-                                          ;; never observed anyway.
-                                          (fn (_) -> int) extract_tag)
+                                          (fn (,tag-type) -> int) extract_tag)
                                          (var ,tag-type ,e-var))))
                  ,(let loop ((tag tag)
                              (x x)
@@ -238,6 +238,11 @@
      (match f
        ((fn ,_ -> ,t) t)
        (,else (error 'type-of "Illegal function type" else))))
+    ((let ,bindings ,[e]) e)
+    ((if ,t ,[e] ,_) e)
+    ((begin ,[e]) e)
+    ((begin ,e . ,e*) (type-of `(begin . ,e*)))
+    ((vector-ref ,t . ,_) t)
     ((kernel ,t . ,_) t)
     ((field ,[e] ,x) e)
     ((var ,t ,x) t))

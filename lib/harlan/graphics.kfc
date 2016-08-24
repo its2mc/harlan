@@ -1,4 +1,64 @@
 (module
+
+  (define-datatype point3i-t
+    (point3i int int int))
+  
+  (define-datatype point3f-t
+    (point3f float float float))
+
+  (define (clamp i)
+    (cond
+      ((< i 0) 0)
+      ((> i 255) 255)
+      (else i)))
+
+  ;; Generates a point3i-t representing an RGB color corresponding to
+  ;; the given hue, saturation and value.
+  ;;
+  ;; h - hue, a float ranging from 0 to 360 degrees
+  ;; s - saturation, a float ranging from 0 to 1
+  ;; v - value, a float ranging from 0 to 1
+  (define (hsv->rgb h s v)
+    ;; adapted from http://www.cs.rit.edu/~ncs/color/t_convert.html
+    (let* ((h (/ h 60))
+           (i (floor h))
+           (f (- h i))
+           (p (* v (- 1 s)))
+           (q (* v (- 1 (* s f))))
+           (t (* v (- 1 (* s (- 1 f))))))
+      (let ((v (float->int (* 256 v)))
+            (t (float->int (* 256 t)))
+            (q (float->int (* 256 q)))
+            (p (float->int (* 256 p))))
+        (cond
+          ((< i 1) (point3i v t p))
+          ((< i 2) (point3i q v p))
+          ((< i 3) (point3i p v t))
+          ((< i 4) (point3i p q v))
+          ((< i 5) (point3i t p v))
+          (else    (point3i v p q))))))
+    
+  (define (write-ppm file data)
+    (let ((stream (open_outfile file))
+          (rows (length data))
+          (cols (length (vector-ref data 0))))
+      (println "P3" stream)
+      (print rows stream) (print " " stream) (println cols stream)
+      (println "255" stream)
+      (for (i 0 rows)
+        (for (j 0 cols)
+          (let ((p (vector-ref (vector-ref data i) j)))
+            (match p
+              ((point3i r g b)
+               (begin
+                 (print (clamp r) stream) (print " " stream)
+                 (print (clamp g) stream) (print " " stream)
+                 (print (clamp b) stream) 
+                 ;; dummy expression value
+                 42)))
+            (print " " stream)))
+        (print "\n" stream))
+      (close_outfile stream)))
   
   (define (write-pgm file data)
     (let ((stream (open_outfile file))
@@ -13,10 +73,51 @@
       (for (i 0 rows 1)
         (for (j 0 cols 1)
           (let ((p (vector-ref (vector-ref data i) j)))
+            ;;(println* i "\t" j "\t" p)
             (print (cond
                      ((< p 0)   0)
                      ((> p 255) 255)
                      (else p))
                    stream)
             (print " " stream))))
-      (close_outfile stream))))
+      (close_outfile stream)))
+
+  (define (point-diff x y)
+    (match x
+      ((point3f a b c)
+       (match y
+         ((point3f d e f)
+          (point3f (- a d) (- b e) (- c f)))))))
+
+  (define (point-add x y)
+    (match x
+      ((point3f a b c)
+       (match y
+         ((point3f x y z)
+          (point3f (+ a x) (+ b y) (+ c z)))))))
+
+  (define (point-div (point3f a b c) y)
+    (point3f (/ a y) (/ b y) (/ c y)))
+
+  (define (point-scale (point3f a b c) y)
+    (point3f (* a y) (* b y) (* c y)))
+
+  (define (dot-prod a b)
+    (match a
+      ((point3f ax ay az)
+       (match b
+         ((point3f bx by bz)
+          (+ (* ax bx) (+ (* ay by) (* az bz))))))))
+     
+  (define (point-mag p)
+    (sqrt (dot-prod p p)))
+  
+  (define (unit-length p)
+    (point-div p (point-mag p)))
+
+  (define (rgbf->rgbi x)
+    (match x
+      ((point3f r g b)
+       (point3i (float->int (* r 256))
+                (float->int (* g 256))
+                (float->int (* b 256)))))))

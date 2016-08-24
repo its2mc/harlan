@@ -12,7 +12,7 @@
 
 (define-match annotate-decl*
   (((,tag* ,name* . ,rest*) ...)
-   (map (annotate-decl (append name* '(harlan_sqrt)))
+   (map (annotate-decl (append name* '(harlan_sqrt floor atan2 harlan_error)))
         `((,tag* ,name* . ,rest*) ...))))
 
 (define-match (annotate-decl globals)
@@ -31,12 +31,17 @@
   ((begin ,[stmt* fv**] ...)
    (values `(begin . ,stmt*)
      (apply union/var fv**)))
-  ((kernel ,type ,dims ,[stmt fv*])
+  ((kernel ,type ,dims (danger: ,dv ,dt) ,[stmt fv*])
    (let* ((fv-expr (fold-right remove/var fv* globals))
+          (fv-expr (if (member `(var ,dt ,dv) fv-expr)
+                       fv-expr
+                       `((var ,dt ,dv) . ,fv-expr)))
           (fv-expr (map (lambda (p) `(,(caddr p) ,(cadr p))) fv-expr)))
-     (values `(kernel ,type ,dims (free-vars . ,fv-expr) ,stmt)
+     (values `(kernel ,type ,dims (danger: ,dv ,dt) (free-vars . ,fv-expr) ,stmt)
              (apply union/var fv* (map expr-fv dims)))))
   ((error ,x) (values `(error ,x) `()))
+  ((label ,lbl) (values `(label ,lbl) '()))
+  ((goto ,lbl) (values `(goto ,lbl) '()))
   ((return) (values `(return) `()))
   ((return ,e)
    (values `(return ,e) (expr-fv e)))
@@ -58,7 +63,7 @@
      (values `(let ((,x* ,t*) ...) ,stmt)
              fv*)))
   ((let-region (,r ...) ,[stmt fv*])
-   (values `(let-region (,r ...) ,stmt) fv*))
+   (values `(let-region (,r ...) ,stmt) (fold-right remove/var fv* r)))
   ((while ,e ,[stmt sfv*])
    (values `(while ,e ,stmt)
      (union/var (expr-fv e) sfv*)))
@@ -79,8 +84,12 @@
 
 (define-match expr-fv
   ((,t ,n) (guard (scalar-type? t)) `())
+  ;; FIXME: This is sort of a cheat...  It is a hack to deal with the
+  ;; fact that kernel arguments have been converted to pointers, but
+  ;; they aren't actually pointers.
+  ((var (ptr ,t) ,x) `((var ,t ,x)))
   ((var ,t ,x) `((var ,t ,x)))
-  ((int->float ,[fv*]) fv*)
+  ((cast ,t ,[e]) e)
   ((length ,[fv*]) fv*)
   ((addressof ,[fv*]) fv*)
   ((not ,[e]) e)
@@ -104,6 +113,7 @@
    (union/var lfv* rfv*))
   ((field ,[e] ,x) e)
   ((empty-struct) '())
+  ((unsafe-vec-ptr ,t ,[v]) v)
   ((vector-ref ,t ,[vfv*] ,[ifv*])
    (union/var vfv* ifv*)))
 

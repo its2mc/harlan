@@ -51,17 +51,36 @@ device_list::device_list(cl_device_type type)
     CL_CHECK(clGetPlatformIDs(0, NULL, &nPlatforms));
     assert(nPlatforms > 0);
 
+    //cerr << "found " << nPlatforms << " platforms." << endl;
+
     platforms = new cl_platform_id[nPlatforms];
     CL_CHECK(clGetPlatformIDs(nPlatforms, platforms, &nPlatforms));
 
     // Find out how many devices there are.
     cl_uint n_dev = 0;
+    int platform = -1;
     for(int i = 0; i < nPlatforms; ++i) {
-        status = clGetDeviceIDs(platforms[i], type, CL_UINT_MAX, NULL, &n_dev);
+        status = clGetDeviceIDs(platforms[i], type, 0, NULL, &n_dev);
         if(CL_DEVICE_NOT_FOUND == status)
             continue;
-        CL_CHECK(status);
+        CL_CHECK_MSG(status, "clGetDeviceIDs (count)");
         num_ids += n_dev;
+
+        char n[256] = {0};
+        clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, sizeof(n), n, NULL);
+        
+        cerr << "OpenCL Platform Name:    " << n << endl;
+        
+        clGetPlatformInfo(platforms[i], CL_PLATFORM_VENDOR, sizeof(n), n, NULL);
+        
+        cerr << "OpenCL Platform Vendor:  " << n << endl;
+
+        clGetPlatformInfo(platforms[i], CL_PLATFORM_VERSION, sizeof(n), n, NULL);
+        
+        cerr << "OpenCL Platform Version: " << n << endl;
+
+        platform = i;
+
         break;
     }
 
@@ -75,15 +94,10 @@ device_list::device_list(cl_device_type type)
     // Allocate memory, gather information about all the devices.
     devices = new cl_device_id[num_ids];
   
-    size_t offset = 0;
-    for(int i = 0; i < nPlatforms; ++i) {
-        status = clGetDeviceIDs(platforms[i], type, CL_UINT_MAX,
-                                devices + offset, &n_dev);
-        if(CL_DEVICE_NOT_FOUND == status)
-            continue;
-        CL_CHECK(status);
-        offset += n_dev;
-    }
+    status = clGetDeviceIDs(platforms[platform], type, min(num_ids, n_dev),
+                            devices, &n_dev);
+    //cerr << status << ", " << n_dev << endl;
+    CL_CHECK_MSG(status, "clGetDeviceIDs");
 
     delete [] platforms;
 }
@@ -115,12 +129,14 @@ context::context(device_list &devices)
   cl_int status;
   ctx = clCreateContext(0, devices.count(), devices.ids(),
                         sLogError, this, &status);
-  CL_CHECK(status);
+  CL_CHECK_MSG(status, "clCreateContext");
 }
 
 context::~context()
 {
+	//cerr << "Destroying context" << endl;
 	clReleaseContext(ctx);
+	//cerr << "Context destroyed" << endl;
 }
 
 void context::sLogError(const char *errinfo,
@@ -145,7 +161,9 @@ kernel::kernel(cl_kernel k)
 
 kernel::~kernel()
 {
+	//cerr << "Destroying kernel" << endl;
 	clReleaseKernel(k);
+	//cerr << "Kernel destroyed" << endl;
 }
 
 size_t kernel::maxWorkGroupSize(cl_device_id device)
@@ -170,7 +188,9 @@ program::program(cl_program prog)
 
 program::~program()
 {
+	//cerr << "Destroying program" << endl;
 	clReleaseProgram(prog);
+	//cerr << "Program destroyed" << endl;
 }
 
 string escape_path(const char *s) {
@@ -194,6 +214,8 @@ void program::build()
     string opts = "-I";
     opts += escape_path(cwd);
     opts += " -I/Users/eric/class/osl/dpp/svn/user/webyrd/harlan";
+	if(getenv("HARLAN_DISABLE_OPENCL_OPTS"))
+		opts += " -cl-opt-disable";
     // opts += " -Werror";
     free(cwd);
     cl_int status = clBuildProgram(prog, 0, NULL, opts.c_str(), NULL, NULL);
@@ -208,11 +230,12 @@ void program::build()
                                        NULL));
         std::cerr << log << std::endl;
     }
-    CL_CHECK(status);
+    CL_CHECK_MSG(status, "clBuildProgram");
 }
 
 kernel program::createKernel(string name)
 {
+	//cerr << "Creating kernel" << endl;
 	return kernel(clCreateKernel(prog, name.c_str(), NULL));
 }
 
@@ -301,7 +324,7 @@ program context::createProgramFromSource(string src)
   const char *c_src = src.c_str();
   cl_int status;
   cl_program p = clCreateProgramWithSource(ctx, 1, &c_src, NULL, &status);
-  CL_CHECK(status);
+  CL_CHECK_MSG(status, "clCreateProgramWithSource");
   return program(p);
 }
 
@@ -322,7 +345,7 @@ command_queue context::createCommandQueue(cl_device_id dev)
 						  dev,
 						  0, // properties
 						  &status);
-	CL_CHECK(status);
+	CL_CHECK_MSG(status, "clCreateCommandQueue");
 	return command_queue(q);
 }
 
@@ -360,6 +383,10 @@ string cl::format_status(cl_int e) {
         STATUS_STR(CL_OUT_OF_RESOURCES);
         STATUS_STR(CL_OUT_OF_HOST_MEMORY);
 
+#if __OPENCL_VERSION__ >= 200        
+        STATUS_STR(CL_PLATFORM_NOT_FOUND_KHR);
+#endif
+
     default:
         stringstream s;
         s << "Unknown";
@@ -367,9 +394,11 @@ string cl::format_status(cl_int e) {
     }
 }
 
-void cl::handle_error(const char *code, cl_int e)
+void cl::handle_error(const char *code, cl_int e, std::string file, int line)
 {
     cerr << code << " failed with error "                           
-         << format_status(e) << " (" << e << ")" << endl;           
+         << format_status(e) << " (" << e << ") in "
+		 << file << ":" << line
+		 << endl;           
 	abort();														
 }

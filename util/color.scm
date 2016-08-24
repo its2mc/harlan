@@ -27,7 +27,8 @@
   (define set-color
     (case-lambda
       ((color port)
-       (put-string port (set-color-string color)))
+       (put-string port (set-color-string color))
+       (flush-output-port port))
       ((color)
        (set-color color (current-output-port)))))
 

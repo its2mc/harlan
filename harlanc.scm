@@ -1,26 +1,18 @@
 #! /usr/bin/env scheme-script
 ;; -*- scheme -*-
 (import
-  (chezscheme)
+  (rnrs)
   (harlan compile-opts)
   (harlan driver)
   (harlan backend print-c)
   (harlan compiler)
+  (util compat)
   (util system) ;; HARLAND
   )
-
-(print-gensym 'pretty/suffix)
 
 ;; This could be set from the env var HARLAND, or based on the
 ;; directory in which this script resides.  Using the latter:
 (HARLAND (path-parent (car (command-line))))
-
-;; Converts foo/bar.kfc to bar
-(define (output-filename input)
-  (let ((base (path-last (path-root input))))
-    (if (make-shared-object)
-        (string-append base ".so")
-        base)))
 
 (define print-compile-harlan
   (lambda (filename)
@@ -32,7 +24,7 @@
                  (c-code (if (timing)
                              (time (harlan-format-c c-expr))
                              (harlan-format-c c-expr))))
-            (if (verbose) (printf c-code))
+            (if (verbosity? trace-pass-verbosity-level) (printf c-code))
             (g++-compile-stdin c-code (output-filename filename)))))))
 
 (define (harlanc args)
@@ -41,5 +33,7 @@
       ;; There should be a usage.
       (let ((filename (car args)))
         (print-compile-harlan filename)))))
+
+;;(trace-pass 'lift-complex 'returnify-kernels)
 
 (harlanc (command-line))

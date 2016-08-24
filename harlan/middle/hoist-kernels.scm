@@ -4,8 +4,12 @@
   (import
    (rnrs)
    (except (elegant-weapons helpers) ident?)
+   (util compat)
    (elegant-weapons sets)
    (harlan helpers))
+
+(define context-name (make-parameter 'annon-kernel))
+
 
 (define-match hoist-kernels
   ((module ,[hoist-decl -> decl* kernel*] ...)
@@ -26,9 +30,12 @@
    (apply union t))
   ((union (,name ,[type-symbols -> t]) ...)
    (apply union t))
+  ((box ,r ,[t]) t)
   (,x (guard (symbol? x)) (list x)))
 
 (define-match stmt-symbols
+  ((apply-kernel ,x (,[expr-symbols -> dim*] ...) ,[expr-symbols -> e*] ...)
+   (union (apply union dim*) (apply union e*)))
   ((let ,x ,[type-symbols -> t] ,[expr-symbols -> e])
    (union t e))
   ((let ,x ,[type-symbols -> t]) t)
@@ -45,6 +52,8 @@
    (union t s))
   ((return) '())
   ((error ,x) '())
+  ((label ,lbl) '())
+  ((goto ,lbl) '())
   ((return ,[expr-symbols -> e]) e)
   ((print ,[expr-symbols -> e]) e)
   ((do ,[expr-symbols -> e]) e)
@@ -55,6 +64,8 @@
   ((int ,n) '())
   ((bool ,b) '())
   ((float ,f) '())
+  ((u64 ,u) '())
+  ((char ,c) '())
   ((str ,s) '())
   ((var ,[type-symbols -> t] ,x) (set-add t x))
   ((deref ,[e]) e)
@@ -111,8 +122,12 @@
   (filter-decls syms cons '()))
 
 (define-match hoist-decl
-  ((fn ,name ,args ,type ,[hoist-stmt -> stmt kernel*])
-   (values `(fn ,name ,args ,type ,stmt) kernel*))
+  ((fn ,name ,args ,type ,stmt)
+   (parameterize 
+     ((context-name name))
+     (let-values 
+       (((stmt kernel*) (hoist-stmt stmt)))
+       (values `(fn ,name ,args ,type ,stmt) kernel*))))
   ((extern ,name ,arg-types -> ,t)
    (values `(extern ,name ,arg-types -> ,t) '()))
   ((typedef ,name ,t)
@@ -123,7 +138,7 @@
 (define-match hoist-stmt
   ((kernel ,dims (free-vars (,fv* ,ft*) ...)
      ,[hoist-stmt -> stmt kernel*])
-   (let ((name (gensym 'kernel)))
+   (let ((name (gensym (context-name))))
      (let-values (((fv*^ ft*^ casts)
                    (regionptr->voidptr fv* ft*)))
        (values

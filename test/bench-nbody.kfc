@@ -8,6 +8,11 @@
   (define-datatype point3_t
     (point3 float float float))
 
+  (define-macro take ()
+    ((_ n v)
+     (kernel ((i (iota n)))
+       (vector-ref v i))))
+  
   ;; The points don't really matter. This will just make a bunch.
   (define (make-points N)
     (kernel ((i (iota N)))
@@ -43,7 +48,7 @@
     (kernel ((i bodies))
       (reduce point-add
         (kernel ((j bodies))
-          (let* ((diff (point-diff i j))
+          (let* ((diff (point-diff j i))
                  (d (point-mag diff)))
             (if (< 0 d)
                 (point-div diff (* (* d d) d))
@@ -56,12 +61,26 @@
            (stop (nanotime)))
       (print len)
       (print "\t")
-      (print (/ (- stop start) 1000))
-      (print "\n")))
+      ; (print (/ (- stop start) 1000))
+      (println* "\nSELFTIMED: " (/ (u64->float (/ (- stop start) 1000)) 1e6))
+      (print "\n")
+      (println "First 10 bodies:")
+      (println (take 10 bodies))
+      (println "First 10 forces:")
+      (println (take 10 forces))))
   
   (define (main)
-    (for (i 1 66)
-      (bench-length (* i 1000)))
-    (return 0))
+    ; (for (i 1 66)
+    ;   (bench-length (* i 1000)))
+
+    ;; Argument is the number of bodies
+    (let* ((args (command-line))
+           (size (if (> (length args) 1)
+                     (parse-str->int (vector-ref args 1) -99) 10)))
+      (println* "Running benchmark for size " size ", command line args were: " args)
+      (bench-length (* size 1000))
+      )
+
+    0)
   
   )

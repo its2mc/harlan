@@ -4,9 +4,7 @@
   (import
     (rnrs)
     (elegant-weapons helpers)
-    (elegant-weapons compat)
-    (only (chezscheme) printf trace-define)
-    (cKanren mk))
+    (elegant-weapons compat))
 
   ;; This pass macro-expands primitives. It also inserts fresh region
   ;; variables.
@@ -113,6 +111,8 @@
     ((,t ,v) (guard (scalar-type? t)) `(,t ,v))
     ((var ,t ,x) `(var ,t ,x))
     ((int->float ,[e]) `(int->float ,e))
+    ((float->int ,[e]) `(float->int ,e))
+    ((cast ,t ,[e]) `(cast ,t ,e))
     ((iota ,[e])
      `(iota ,e))
     ((iota-r ,r ,[e])
@@ -141,6 +141,8 @@
      `(vector-ref ,t ,v ,i))
     ((unsafe-vector-ref ,t ,[v] ,[i])
      `(unsafe-vector-ref ,t ,v ,i))
+    ((unsafe-vec-ptr ,t ,[v])
+     `(unsafe-vec-ptr ,t ,v))
     ((length ,[e])
      `(length ,e))
     ((call ,[f] ,[args] ...)
@@ -154,7 +156,7 @@
     ((if ,[test] ,[conseq])
      `(if ,test ,conseq))
     ((kernel ,ktype (((,x ,t) (,[xs] ,ts)) ...) ,[body])
-     `(kernel ,ktype ,(var 'region) (((,x ,t) (,xs ,ts)) ...) ,body))
+     `(kernel ,ktype ,(gensym 'region) (((,x ,t) (,xs ,ts)) ...) ,body))
     ((kernel-r ,ktype ,r (((,x ,t) (,[xs] ,ts)) ...) ,[body])
      `(kernel ,ktype ,r (((,x ,t) (,xs ,ts)) ...) ,body))
     ((let ((,x* ,t* ,[e*]) ...) ,[e])
@@ -167,6 +169,8 @@
      (expand-vec-comparison t r lhs rhs))
     ((match ,t ,[e] (,p ,[e*]) ...)
      `(match ,t ,e (,p ,e*) ...))
+    ((error! ,s)
+     `(call (var (fn () -> void) harlan_error) (str ,s)))
     ((,op ,t ,[lhs] ,[rhs])
      (guard (or (relop? op) (binop? op)))
      `(,op ,lhs ,rhs)))
@@ -206,7 +210,7 @@
       `(let ((,l (vec ,t) ,lhs)
              (,r (vec ,t) ,rhs))
          (let ((,len int (length (var (vec ,t) ,l))))
-           (let ((,res (vec ,t) (make-vector ,t ,(var 'region) (var int ,len))))
+           (let ((,res (vec ,t) (make-vector ,t ,(gensym 'region) (var int ,len))))
              (begin
                (for (,i (int 0) (var int ,len) (int 1))
                     (let ((,lhsi

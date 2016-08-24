@@ -3,10 +3,12 @@
   (export generate-kernel-calls)
   (import
    (rnrs)
-   (only (chezscheme) pretty-print)
    (nanopass)
    (except (elegant-weapons helpers) ident?)
-   (harlan middle languages)
+   (elegant-weapons print-c)
+   (harlan compile-opts)
+   (harlan middle languages M8)
+   (harlan middle languages M9)
    (harlan helpers))
 
 (define-pass generate-kernel-calls
@@ -23,7 +25,7 @@
                               (call
                                (field (var cl::program g_prog)
                                       createKernel)
-                               (str ,(symbol->string x))))))
+                               (str ,(run-format (mangle-ident (symbol->string x))))))))
            (arg-def (map (lambda (n d)
                            `(let ,n int ,d))
                          dim-names e1*))

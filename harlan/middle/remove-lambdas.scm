@@ -3,13 +3,13 @@
   (export remove-lambdas)
   (import
    (rnrs)
-   (only (chezscheme) pretty-print trace-define)
    (nanopass)
    (except (elegant-weapons match) ->)
    (harlan compile-opts)
    (harlan helpers)
-   (harlan middle languages)
+   (harlan middle languages M0-3)
    (elegant-weapons sets)
+   (util compat)
    (only (elegant-weapons helpers) gensym andmap map-values))
   
   (define-pass uncover-lambdas : M0 (m) -> M1 ()
@@ -40,9 +40,15 @@
         (nanopass-case
          (M0 Expr) e
          ((int ,i) '())
+         ((float ,f) '())
+         ((bool ,b) '())
          ((var ,t ,x) (list (list x t)))
          ((lambda ,t ((,x* ,t*) ...) ,[e])
           (remove-vars x* e))
+         ((let ((,x* ,t* ,[e*]) ...) ,[e])
+          (apply union (remove-vars x* e) e*))
+         ((if ,[e0] ,[e1] ,[e2])
+          (union e0 e1 e2))
          ((vector-ref ,t ,[e0] ,[e1])
           (union e0 e1))
          ((call (var ,t ,x) ,[e*] ...)
@@ -121,17 +127,27 @@
              (closure ,r2 (,t2* ...) ,-> ,t2))
             ;; TODO: This needs to consider region variables and
             ;; renaming.
-            (and (eq? (length t1*) (length t2*))
-                 (andmap type-compat? (cons t1 t1*) (cons t2 t2*))))
+            (let ((result 
+                   (and (eq? (length t1*) (length t2*))
+                        (andmap type-compat? (cons t1 t1*) (cons t2 t2*)))))
+              ;;(pretty-print "type-compat?")
+              ;;(pretty-print (unparse-M1 a))
+              ;;(pretty-print " and ")
+              ;;(pretty-print (unparse-M1 b))
+              ;;(pretty-print "=>")
+              ;;(pretty-print result)
+              result))
            (((ptr ,t1) (ptr ,t2))
             (loop t1 t2 env))
            (((adt ,x1 ,r1) (adt ,x2 ,r2))
             (eq? x1 x2))
+           (((adt ,x1) (adt ,x2))
+            (eq? x1 x2))
            ((,bt1 ,bt2) (equal? bt1 bt2))
            (else (begin
-                   (pretty-print "Failed Match!\n")
-                   (pretty-print a)
-                   (pretty-print b)
+                   ;;(pretty-print "Failed Match!\n")
+                   ;;(pretty-print a)
+                   ;;(pretty-print b)
                    #f)))))
 
       (define (select-closure-type t closures)
@@ -217,12 +233,20 @@
             (loop t1 t2 env))
            (((adt ,x1 ,r1) (adt ,x2 ,r2))
             (eq? x1 x2))
+           (((adt ,x1) (adt ,x2))
+            (eq? x1 x2))
            ((,bt1 ,bt2) (equal? bt1 bt2))
            (else (begin
-                   (pretty-print "Failed Match!")
-                   (pretty-print a)
-                   (pretty-print b)
+                   ;;(pretty-print "Failed Match!")
+                   ;;(pretty-print (unparse-M2 a))
+                   ;;(pretty-print (unparse-M2 b))
                    #f)))))
+
+      (define (type-of e)
+        (nanopass-case
+         (M3 Expr) e
+         ((var ,t ,x) t)
+         (else (error 'type-of "unimplemented expr" (unparse-M3 e)))))
 
       (define (find-env t env)
         (pair-case
@@ -232,18 +256,24 @@
             ((,x0 ,x1 ,t^)
              (if (type-compat? t t^)
                  `(,x0 ,x1 ,t^)
-                 (find-env t rest)))))
+                 (find-env t rest)))
+            (,_ (error 'find-env "Wat?" _))))
          (_ => #f)))
       
       (define (find-typename t env)
         (match (find-env t env)
           ((,x0 ,x1 ,t)
-           x0)))
+           x0)
+          (,_ (begin
+                (pretty-print (unparse-M2 t))
+                (pretty-print env)
+                (error 'find-typename "Wat?" _)))))
 
       (define (find-dispatch t env)
         (match (find-env t env)
           ((,x0 ,x1 ,t)
-           x1))))
+           x1)
+          (,_ (error 'find-dispatch "Wat?" _)))))
 
     (Rho-Type
      : Rho-Type (t env) -> Rho-Type ()
@@ -259,11 +289,9 @@
      ((,x (,x0 ...) ,e (,x* ,[Rho-Type : t* env -> t*]) ...)
       `(,x ,t* ...)))
 
-    (ClosureTag : ClosureTag (t env) -> ClosureTag ())
-
     (ClosureMatch
      : ClosureTag (t formals ftypes env) -> MatchArm ()
-     ((,x (,x0 ...) ,[e] (,x1 ,t1) ...)
+     ((,x (,x0 ...) ,[Expr : e env -> e] (,x1 ,t1) ...)
       `((,x ,x1 ...)
         (let ((,x0 ,ftypes (var ,ftypes ,formals)) ...)
           ,e))))
@@ -274,67 +302,80 @@
       `(,x0 ,x1 ,t)))
     
     (ClosureGroup
-     : ClosureGroup (cgroup env) -> ClosureGroup (typedef dispatch)
+     : ClosureGroup (cgroup env) -> * (typedef dispatch)
      ((,x0 ,x1 ,t ,ctag ...)
-      (let* ((cgroup `(,x0 ,x1 ,t ,(map (lambda (t) (ClosureTag t env))
-                                       ctag) ...)))
-        (nanopass-case
-         (M2 Rho-Type) t
-         ((closure ,r (,t* ...) ,-> ,t)
-          (values cgroup
-                  (with-output-language
-                   (M3 Decl)
-                   `(define-datatype (,x0 ,r) ,(map (lambda (t)
-                                                    (ClosureCase t env))
-                                                  ctag) ...))
-                  (with-output-language
-                   (M3 Decl)
-                   (let* ((formals (map (lambda _ (gensym 'formal)) t*))
-                          (t* (map (lambda (t) (Rho-Type t env)) t*))
-                          (t (Rho-Type t env))
-                          (x (gensym 'closure))
-                          (ctype (with-output-language
-                                  (M3 Rho-Type)
-                                  `(adt ,x0 ,r)))
-                          (arms (map (lambda (t)
-                                       (ClosureMatch t formals t* env))
-                                     ctag)))
-                     `(fn ,x1 (,(cons x formals) ...)
-                          (fn (,(cons ctype t*) ...) -> ,t)
-                          (return (match ,t (var ,ctype ,x)
-                                         ,arms ...))))))))
-        )))
+      (nanopass-case
+        (M2 Rho-Type) t
+        ((closure ,r (,t* ...) ,-> ,t)
+         (values
+           (with-output-language
+             (M3 Decl)
+             `(define-datatype (,x0 ,r) ,(map (lambda (t)
+                                                (ClosureCase t env))
+                                           ctag) ...))
+           (with-output-language
+             (M3 Decl)
+             (let* ((formals (map (lambda _ (gensym 'formal)) t*))
+                     (t* (map (lambda (t) (Rho-Type t env)) t*))
+                     (t (Rho-Type t env))
+                     (x (gensym 'closure))
+                     (ctype (with-output-language
+                              (M3 Rho-Type)
+                              `(adt ,x0 ,r)))
+                     (arms (map (lambda (t)
+                                  (ClosureMatch t formals t* env))
+                             ctag)))
+               `(fn ,x1 (,(cons x formals) ...)
+                  (fn (,(cons ctype t*) ...) -> ,t)
+                  (return (match ,t (var ,ctype ,x)
+                            ,arms ...))))))))
+        ))
 
     (Closures
      : Closures (x) -> Module ()
      ((closures (,cgroup ...) ,m)
       (let ((env (map MakeEnv cgroup)))
-        (let-values (([cgroup types dispatches]
+        (let-values (([types dispatches]
                       (if (null? cgroup)
-                          (values '() '() '())
+                          (values '() '())
                           (map-values (lambda (g)
                                         (ClosureGroup g env))
                                       cgroup ))))
           (Module m env types dispatches)))))
 
     (Body : Body (b env) -> Body ())
-
+    (LetBinding : LetBinding (lbind env) -> LetBinding ())
+    
     (MatchArm : MatchArm (arm env) -> MatchArm ())
     
     (Decl : Decl (d env) -> Decl ())
     
     (Expr
      : Expr (e env) -> Expr ()
-     ((make-closure ,t ,x ,[e*] ...)
+     ((make-closure ,t ,x ,[Expr : e* env -> e*] ...)
       (let ((adt-name (find-typename t env)))
         (nanopass-case
          (M2 Rho-Type) t
          ((closure ,r (,t* ...) ,-> ,t^)
-          `(call (var (fn (_) -> (adt ,adt-name ,r)) ,x) ,e* ...)))))
-     ((invoke ,e ,[e*] ...)
+          `(call (var (fn (,(map type-of e*) ...) -> (adt ,adt-name ,r)) ,x)
+                 ,e* ...)))))
+     ((invoke ,e ,[Expr : e* env -> e*] ...)
       (nanopass-case
        (M2 Expr) e
        ((var (closure ,r (,t* ...) ,-> ,t^) ,x)
+        (let ((e (Expr e env))
+              (t (with-output-language
+                  (M2 Rho-Type)
+                  `(closure ,r (,t* ...) ,-> ,t^))))
+          (let ((dispatch (find-dispatch t env))
+                (t (Rho-Type t env))
+                (t^ (Rho-Type t^ env))
+                (t* (map (lambda (t) (Rho-Type t env)) t*)))
+            `(call
+              (var (fn (,(cons t t*) ...) -> ,t^)
+                   ,dispatch)
+              ,(cons e e*) ...))))
+       ((make-closure (closure ,r (,t* ...) ,-> ,t^) ,x ,e** ...)
         (let ((e (Expr e env))
               (t (with-output-language
                   (M2 Rho-Type)
@@ -360,30 +401,33 @@
             `(call
               (var (fn (,(cons t t*) ...) -> ,t^)
                    ,dispatch)
-              ,(cons e e*) ...)))))))
+              ,(cons e e*) ...))))
+       ((match (closure ,r (,t* ...) ,-> ,t^) ,e^ ,arm ...)
+        (let ((e (Expr e env))
+              (t (with-output-language
+                  (M2 Rho-Type)
+                  `(closure ,r (,t* ...) ,-> ,t^))))
+          (let ((dispatch (find-dispatch t env))
+                (t (Rho-Type t env))
+                (t^ (Rho-Type t^ env))
+                (t* (map (lambda (t) (Rho-Type t env)) t*)))
+            `(call
+              (var (fn (,(cons t t*) ...) -> ,t^)
+                   ,dispatch)
+              ,(cons e e*) ...))))
+       (else (error 'Expr "unknown invoke target" (unparse-M2 e))))))
     
     (Module
      : Module (m env types dispatches) -> Module ()
      ((module ,[decl env -> decl] ...)
-      `(module ,(append types dispatches decl) ...)))
+      `(module ,(append decl types dispatches) ...)))
         
      )
-    
-    ;; We'll need to do a couple of things here. First, we need to
-    ;; sort all the closures by type. Next, we pass this information
-    ;; into the module clause, which will generate ADTs for each
-    ;; closure. This will also produce an environment which we thread
-    ;; down to the Expr class, which is used to remove both
-    ;; make-closure and invoke.
-  ;;)
 
   (define (remove-lambdas module)
     (>::> module
           uncover-lambdas
-          (trace-message "uncovered lambdas")
           sort-closures
-          (trace-message "sorted closures")
-          remove-closures
-          (trace-message "removed closures")))
+          remove-closures))
   )
 

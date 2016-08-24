@@ -4,8 +4,7 @@
   (import
     (rnrs)
     (harlan helpers)
-    (except (elegant-weapons helpers) ident?)
-    (cKanren mk))
+    (except (elegant-weapons helpers) ident?))
 
 (define-match lower-vectors
   ((module ,[lower-decl -> decl*] ...)
@@ -35,6 +34,8 @@
    `(for (,i ,start ,end ,step) ,stmt))
   ((set! ,lhs ,rhs)
    `(set! ,lhs ,rhs))
+  ((label ,lbl) `(label ,lbl))
+  ((goto ,lbl) `(goto ,lbl))
   ((return)
    `(return))
   ((return ,e)
@@ -43,8 +44,8 @@
    `(assert ,e))
   ((print ,e* ...)
    `(print . ,e*))
-  ((kernel ,t (,dims ...) ,fv* ,[stmt])
-   `(kernel ,t ,dims ,fv* ,stmt))
+  ((kernel ,t (,dims ...) (danger: . ,dng) ,fv* ,[stmt])
+   `(kernel ,t ,dims (danger: . ,dng) ,fv* ,stmt))
   ((do ,e) `(do ,e)))
 
 (define (lower-lifted-expr b s)
@@ -69,6 +70,7 @@
                ,rest)))
     (((,x ,t ,e) . ,[rest])
      ;;(display `((,x ,t ,e) ,rest)) (newline)
+     ;;(display (car e)) (newline)
      (assert (not (and (pair? e) (or (eq? (car e) 'vector)
                                      (eq? (car e) 'box)))))
      `(let ((,x ,t ,e)) ,rest))

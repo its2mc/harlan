@@ -3,7 +3,7 @@
 ;; Used to help develop the passes to make recursion work.
 
 (%testspec
- (%tags xfail))
+ (%tags recursive))
 
 (module
   (define (fact n)
@@ -12,5 +12,5 @@
         (* n (fact (- n 1)))))
 
   (define (main)
-    (kernel ((i (vector 5))) (fact i))
+    (println (kernel ((i (vector 5))) (fact i)))
     0))

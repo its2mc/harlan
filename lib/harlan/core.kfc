@@ -2,16 +2,38 @@
 
 (module
 
-  (extern open_outfile (str) -> (ptr ofstream))
   (extern close_outfile ((ptr ofstream)) -> void)
+  (extern command-line () -> (vec str))
+  (extern flush-stdout () -> void)
+  (extern get-environment-variable (str) -> str)
+  (extern nanotime () -> u64)
+  (extern open_outfile (str) -> (ptr ofstream))
+  (extern str->vec (str) -> (vec char))
+  (extern time-s () -> float)
 
+  (define-macro define-binders ()
+    ((_ name ((tag x ...) binder ...) (arg ...) (e ...))
+     (define-binders name (binder ...)
+       (arg ... match-tmp)
+       ((match match-tmp
+          ((tag x ...)
+           (begin e ...))))))
+    ((_ name (x binder ...) (arg ...) (e ...))
+     (define-binders name (binder ...) (arg ... x) (e ...)))
+    ((_ name () (arg ...) (e ...))
+     (prim-define (name arg ...) e ...)))
+  
+  (define-macro define ()
+    ((_ (name binder ...) e ...)
+     (define-binders name (binder ...) () (e ...))))
+  
   (define-macro cond (else)
-    ((_ (else body))
-     body)
-    ((_ (test body))
-     (if test body))
-    ((_ (test body) rest ...)
-     (if test body (cond rest ...))))
+    ((_ (else body ...))
+     (begin body ...))
+    ((_ (test body ...))
+     (if test (begin body ...)))
+    ((_ (test body ...) rest ...)
+     (if test (begin body ...) (cond rest ...))))
 
   (define-macro let* ()
     ((_ () b ...) (begin b ...))
@@ -24,11 +46,18 @@
      (for (i start stop 1) body ...))
     ((_ (i start stop step) body ...)
      (let ((i start)
-           (stepv step))
-       (while (< i stop)
+           (stepv step)
+           (stopv stop))
+       (while (< i stopv)
          body ...
          (set! i (+ i stepv))))))
 
+  (define-macro make-vector ()
+    ((_ len init)
+     (let ((t init))
+       (kernel ((i (iota len)))
+         t))))
+  
   (define-macro kernel* ()
     ((_ ((x e)) b)
      (kernel ((x e)) b))
@@ -61,7 +90,7 @@
     ;; (inner-reduce op e))
     ((_ op (kernel ((x e) (x* e*) ...) b))
      (let ((x e)
-           (stride 65536))
+           (stride 30))
        (if (< (length x) stride)
            (inner-reduce op (kernel ((x x) (x* e*) ...) b))
            (inner-reduce
@@ -92,7 +121,143 @@
                            tmp))))
              (inner-reduce op t))))))
 
+  ;; TODO: This is totally sequential, but the goal is to get enough
+  ;; to write other programs that use scan.
+  (define-macro scan ()
+    ((_ op _init _vec)
+     (let ((init _init)
+           (vec _vec))
+       (let ((result (make-vector (length vec) init))
+             (acc init))
+         (for (i 0 (length vec))
+           ;; TODO: this isn't actually legal Harlan...
+           (set! (unsafe-vector-ref result i) acc)
+           (set! acc (op acc (unsafe-vector-ref vec i))))
+         result))))
+
+  ;; TODO: This is also pretty sequential, but we can parallelize it later.
+  (define-macro filter ()
+    ((_ p? _xs)
+     (let* ((xs _xs)
+            (len (reduce + (kernel ((x xs)) (if (p? x) 1 0))))
+            (result (make-vector len (vector-ref xs 0)))
+            (j 0))
+       (for (i 0 (length xs))
+         (if (p? (unsafe-vector-ref xs i))
+             (begin (set! (unsafe-vector-ref result j) (unsafe-vector-ref xs i))
+                    (set! j (+ 1 j)))))
+       result)))
+       
+  
   (define-macro sqrt ()
     ((_ x) (harlan_sqrt x)))
+
+  (define-macro println ()
+    ((_ e) (begin (print e) (print "\n")))
+    ((_ e s) (let ((stream s)) (print e s) (print "\n" s))))
+
+  (define-macro and ()
+    ((_ e) e)
+    ((_ e e* ...)
+     (if e (and e* ...) #f)))
+
+  (define-macro or ()
+    ((_ e) e)
+    ((_ e1 e2)
+     (if e1 #t e2))
+    ((_ e e* ...)
+     (if e #t (or e* ...))))
+
+  ;; TODO: this should really just be made into a proper operator.
+  (define-macro not ()
+    ((_ e)
+     (let ((b e))
+       (if b
+           #f
+           #t))))
   
-  )
+  (define-macro print* ()
+    ((_ e e* ...)
+     (begin (print e) (print e*) ... )))
+
+  (define-macro println* ()
+    ((_ e)
+     (println e))
+    ((_ e e* ...)
+     (begin (print e) (println* e* ...))))
+
+  (define-macro print-vec ()
+    ((_ v)
+     (let ((t v))
+       (print "[")
+       (for (i 0 (length t))
+         (begin
+           (print " ")
+           (print (vector-ref t i))))
+       (print " ]"))))
+
+  (define-macro println-vec ()
+    ((_ v)
+     (begin (print-vec v) (println ""))))
+
+  (define (char->int c)
+    (unsafe-explicit-cast (char -> int) c))
+
+  (define (int->float i)
+    (unsafe-explicit-cast (int -> float) i))
+
+  (define (float->int f)
+    (unsafe-explicit-cast (float -> int) f))
+
+  (define-datatype u64-value
+  (u64-value u64))
+
+  (define (u64_max)
+  (match (u64-value 18446744073709551615)
+    ((u64-value i) i)))
+
+  (define (u64->float u)
+    (unsafe-explicit-cast (u64 -> float) u))
+
+  (define (parse-char-vec->int-helper v default i acc)
+    (if (= (length v) i)
+        acc
+        (let ((c (char->int (vector-ref v i))))
+          (if (and (<= (char->int #\0) c) (<= c (char->int #\9)))
+              (parse-char-vec->int-helper v default
+                                          (+ 1 i)
+                                          (+ (- c (char->int #\0))
+                                             (* 10 acc)))
+              default))))
+  
+  (define (parse-char-vec->int v default)
+    (parse-char-vec->int-helper v default 0 0))
+  
+  (define (parse-str->int s default)
+    (parse-char-vec->int (str->vec s) default))
+
+  (define (elapsed-sec start end)
+    (/ (u64->float (- end start)) 1e9))
+
+  (define-macro map ()
+    ((_ f arg)
+     (kernel ((x arg))
+       (f x))))
+  
+  (define-macro map2d ()
+    ((_ f data)
+     (kernel ((row data))
+       (kernel ((x row))
+         (f x)))))
+
+  (define-macro max ()
+    ((_ a b)
+     (let ((ta a)
+           (tb b))
+       (if (> a b) a b))))
+
+  (define-macro min ()
+    ((_ a b)
+     (let ((ta a)
+           (tb b))
+       (if (< a b) a b)))))
